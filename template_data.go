@@ -1,0 +1,270 @@
+/*
+Views (c) 2023 by Mikhail Kondrashin (mkondrashin@gmail.com)
+
+template_data.go
+
+TemplateData struct type.
+*/
+
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"html/template"
+	"os"
+	"strings"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+)
+
+type FieldData struct {
+	Name  string
+	Title string
+	Type  string
+}
+
+type ViewData struct {
+	Name   string
+	Title  string
+	Fields []FieldData
+}
+
+type TemplateData struct {
+	Package     string
+	IncludeTime bool
+	Views       []ViewData
+}
+
+func NewTemplateData(Package string) *TemplateData {
+	return &TemplateData{
+		Package:     Package,
+		IncludeTime: false,
+	}
+}
+
+func (d *TemplateData) processDatabase(db *sql.DB) error {
+	query := "SHOW FULL TABLES WHERE Table_Type LIKE 'VIEW'"
+	rows, err := db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	if rows.Err() != nil {
+		return rows.Err()
+	}
+	for rows.Next() {
+		var viewName, Type string
+		if err := rows.Scan(&viewName, &Type); err != nil {
+			return fmt.Errorf("rows.Scan: %w", err)
+		}
+		d.processView(db, viewName)
+	}
+	return nil
+}
+
+type ViewField struct {
+	Field   string
+	Type    string
+	Null    string
+	Key     string
+	Default sql.NullString
+	Extra   sql.NullString
+}
+
+func (d *TemplateData) processView(db *sql.DB, viewName string) error {
+	view := ViewData{
+		Name:  viewName,
+		Title: fieldName(viewName),
+	}
+	query := "SHOW COLUMNS FROM " + viewName
+	rows, err := db.Query(query)
+	if err != nil {
+		return fmt.Errorf("sql.Query: %w", err)
+	}
+	defer rows.Close()
+	if rows.Err() != nil {
+		return fmt.Errorf("rows.Err: %w", rows.Err())
+	}
+	for rows.Next() {
+		var v ViewField
+		if err := rows.Scan(&v.Field, &v.Type, &v.Null, &v.Key, &v.Default, &v.Extra); err != nil {
+			return fmt.Errorf("rows.Scan: %w", err)
+		}
+
+		fieldData := FieldData{
+			Title: fieldName(v.Field),
+			Name:  v.Field,
+			Type:  fieldType(v.Type, v.Null),
+		}
+		view.Fields = append(view.Fields, fieldData)
+		if fieldData.Type == "time.Time" {
+			d.IncludeTime = true
+		}
+	}
+	d.Views = append(d.Views, view)
+	return nil
+}
+
+func Title(text string) string {
+	text = strings.ToUpper(text)
+	acronym := map[string]struct{}{
+		"ID":   struct{}{},
+		"IP":   struct{}{},
+		"VLAN": struct{}{},
+	}
+	_, ok := acronym[text]
+	if ok {
+		return text
+	}
+	return cases.Title(language.English).String(text)
+}
+
+func fieldName(name string) string {
+	parts := strings.Split(name, "_")
+	var result []string
+	for _, p := range parts {
+		result = append(result, Title(p))
+	}
+	return strings.Join(result, "")
+}
+
+func unsigned(text string) string {
+	if strings.HasSuffix(text, "unsigned") {
+		return "u"
+	}
+	return ""
+}
+
+func fieldType(text, null string) string {
+	canBeNull := null == "YES"
+	text = strings.ToLower(text)
+	switch {
+	case strings.HasPrefix(text, "varchar"):
+		fallthrough
+	case text == "longtext":
+		fallthrough
+	case text == "text":
+		fallthrough
+	case text == "mediumtext":
+		fallthrough
+	case strings.HasPrefix(text, "char"):
+		if canBeNull {
+			return "sql.NullString"
+		}
+		return "string"
+	case strings.HasPrefix(text, "bit"):
+		if canBeNull {
+			return "sql.NullBool"
+		}
+		return "bool"
+	case strings.HasPrefix(text, "tinyint"):
+		if canBeNull {
+			return "sql.NullByte"
+		}
+		return unsigned(text) + "int8"
+	case strings.HasPrefix(text, "smallint"):
+		if canBeNull {
+			return "sql.NullInt16"
+		}
+		return unsigned(text) + "int16"
+	case strings.HasPrefix(text, "mediumint"):
+		fallthrough
+	case strings.HasPrefix(text, "int"):
+		if canBeNull {
+			return "sql.NullInt32"
+		}
+		return unsigned(text) + "int"
+	case strings.HasPrefix(text, "bigint"):
+		if canBeNull {
+			return "sql.NullInt64"
+		}
+		return unsigned(text) + "int64"
+	case strings.HasPrefix(text, "blob"):
+		fallthrough
+	case strings.HasPrefix(text, "varbinary"):
+		return "[]byte"
+	case strings.HasPrefix(text, "timestamp"):
+		fallthrough
+	case strings.HasPrefix(text, "time"):
+		fallthrough
+	case strings.HasPrefix(text, "date"):
+		fallthrough
+	case strings.HasPrefix(text, "datetime"):
+		fallthrough
+	case strings.HasPrefix(text, "year"):
+		if canBeNull {
+			return "sql.NullTime"
+		}
+		return "time.Time"
+	case strings.HasPrefix(text, "numeric"):
+		fallthrough
+	case strings.HasPrefix(text, "float"):
+		return "float32"
+	case strings.HasPrefix(text, "real"):
+		fallthrough
+	case strings.HasPrefix(text, "double precision"):
+		fallthrough
+	case strings.HasPrefix(text, "decimal"):
+		return "float64"
+	default:
+		return text
+	}
+}
+
+func (d *TemplateData) Save(fileName string) error {
+	// tabw := tabwriter.NewWriter(f, 8, 8, 8, ' ', 0)
+	f, err := os.Create(fileName)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	//tabw := tabwriter.NewWriter(f, 1, 1, 1, ' ', 0)
+	t2, err := template.New("views").Parse(fileTemplate)
+	if err != nil {
+		return err
+	}
+	return t2.Execute(f, d)
+}
+
+const fileTemplate = `// Code generated by views (github.com/mpkondrashin/views). DO NOT EDIT
+
+package {{.Package}}
+
+import (
+    "database/sql"
+{{- if .IncludeTime}}
+    "time"
+{{- end}}
+)
+
+{{range .Views}}
+type {{ .Title }}Row struct {
+{{range .Fields}}    {{ .Title}}	{{.Type}}
+{{end -}}}
+
+func Iterate{{ .Title }}(db *sql.DB, where string, callback func(v *{{ .Title }}Row) error) error {
+    query := "SELECT {{$sep := ""}}{{range .Fields}}{{$sep}}{{ .Name }}{{$sep = ","}}{{end}} FROM {{.Name}}"
+    rows, err := db.Query(query)
+    if err != nil {
+        return err
+    }
+    defer rows.Close()
+    if rows.Err() != nil {
+        return rows.Err()
+    }
+    for rows.Next() {
+        var r {{ .Title }}Row
+        err := rows.Scan({{$sep := ""}}{{range .Fields}}{{$sep}}&r.{{.Title}}{{$sep = ", "}}{{end}})
+        if err != nil {
+            return err
+        }
+        if err := callback(&r); err != nil {
+            return err
+        }
+    }
+    return nil
+}
+{{end}}
+`
