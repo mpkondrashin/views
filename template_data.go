@@ -240,10 +240,12 @@ import (
 )
 
 {{range .Views}}
+// {{ .Title }}Row struct represents rows of the {{.Name}} table.
 type {{ .Title }}Row struct {
 {{range .Fields}}    {{ .Title}}	{{.Type}}
 {{end -}}}
 
+// Iterate{{ .Title }} provide access to all rows of the {{.Name}} matching given criteria.
 func Iterate{{ .Title }}(db *sql.DB, where string, callback func(v *{{ .Title }}Row) error) error {
     query := "SELECT {{$sep := ""}}{{range .Fields}}{{$sep}}{{ .Name }}{{$sep = ","}}{{end}} FROM {{.Name}}"
     rows, err := db.Query(query)
